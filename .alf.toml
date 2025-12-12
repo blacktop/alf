@@ -1,0 +1,452 @@
+# =============================================================================
+# ALF Configuration
+# =============================================================================
+#
+# This file configures the AI-powered LLDB fuzzing framework.
+#
+# Config file precedence (highest to lowest):
+#   1. CLI flags (--provider, --model, etc.)
+#   2. .alf.toml in current directory or parent directories
+#   3. ~/.config/alf/config.toml (user config)
+#   4. Environment variables (fallback for CI/scripts)
+#
+# =============================================================================
+
+# =============================================================================
+# [provider] - LLM Provider Settings
+# =============================================================================
+#
+# Provider auto-detection priority (when name is not set):
+#   1. ALF_LLM_PROVIDER env var
+#   2. ANTHROPIC_API_KEY present → "anthropic"
+#   3. OPENAI_API_KEY present → "openai"
+#   4. GOOGLE_API_KEY or GEMINI_API_KEY present → "google"
+#   5. ALFF_LLM_BASE_URL set → "ollama"
+#   6. Auto-detect local server by probing ports:
+#      - 11434: Ollama
+#      - 1234: LM Studio
+#      - 8000: vLLM
+#      - 8080: LocalAI
+#   7. Default → "ollama"
+
+[provider]
+# name: LLM provider to use
+# Options: "anthropic", "openai", "google", "ollama", "lmstudio", "vllm", "localai"
+# Env: ALFF_LLM_PROVIDER
+name = "lmstudio"
+
+# model: Model name/ID to use
+# Env: ALFF_LLM_MODEL or LLDB_MCP_MODEL
+# Examples:
+#   Anthropic: "claude-sonnet-4-5-20250929", "claude-sonnet-4-20250514", "claude-3-5-haiku-20241022"
+#   OpenAI: "gpt-4o", "gpt-4o-mini", "gpt-4-turbo"
+#   Google: "gemini-3-flash", "gemini-3-pro"
+#   Ollama: "llama3.1:8b-instruct", "codellama:34b", "mistral:7b"
+#   LM Studio: "openai/gpt-oss-20b", "bytedance/seed-oss-36b", "mistralai/devstral-small-2-2512"
+model = "openai/gpt-oss-20b"
+
+# timeout: Request timeout in seconds
+# Env: ALFF_LLM_TIMEOUT
+# Default: 180
+timeout = 180
+
+# =============================================================================
+# [provider.anthropic] - Anthropic (Claude) Settings
+# =============================================================================
+
+[provider.anthropic]
+# api_key: Anthropic API key
+# Env: ANTHROPIC_API_KEY (recommended - don't put keys in config files)
+# api_key = "sk-ant-..."
+
+# model: Override default model for this provider
+#   latest: claude-haiku-4-5, claude-sonnet-4-5, claude-opus-4-5
+model = "claude-haiku-4-5"
+
+# timeout: Override default timeout for this provider
+# timeout = 300
+
+# =============================================================================
+# [provider.openai] - OpenAI Settings
+# =============================================================================
+
+[provider.openai]
+# api_key: OpenAI API key
+# Env: OPENAI_API_KEY (recommended)
+# api_key = "sk-..."
+
+# base_url: API base URL (for Azure OpenAI or compatible APIs)
+# Env: OPENAI_BASE_URL or ALFF_LLM_BASE_URL
+# Default: "https://api.openai.com/v1"
+# base_url = "https://your-resource.openai.azure.com/openai/deployments/your-deployment"
+
+# model: Override default model
+#  latest: gpt-5.2-2025-12-11, gpt-5-mini-2025-08-07, gpt-5-nano-2025-08-07
+model = "gpt-5-mini-2025-08-07"
+
+# =============================================================================
+# [provider.google] - Google (Gemini) Settings
+# =============================================================================
+
+[provider.google]
+# api_key: Google/Gemini API key
+# Env: GOOGLE_API_KEY or GEMINI_API_KEY (recommended)
+# api_key = "..."
+
+# model: Override default model
+#  latest: gemini-2.5-flash-lite, gemini-3-flash-preview, gemini-2.5-pro, gemini-3-pro-preview
+model = "gemini-3-flash-preview"
+
+# vertexai: Use Vertex AI instead of Google AI Studio
+# Env: GOOGLE_GENAI_USE_VERTEXAI
+# Default: false
+# vertexai = false
+
+# project: Google Cloud project ID (required for Vertex AI)
+# Env: GOOGLE_CLOUD_PROJECT
+# project = "my-gcp-project"
+
+# location: Google Cloud region (for Vertex AI)
+# Env: GOOGLE_CLOUD_LOCATION
+# Default: "us-central1"
+# location = "us-central1"
+
+# =============================================================================
+# [provider.ollama] - Ollama Settings (local server)
+# =============================================================================
+
+[provider.ollama]
+# base_url: Ollama API endpoint
+# Env: ALFF_LLM_BASE_URL or OPENAI_BASE_URL
+# Default: "http://127.0.0.1:11434/v1"
+base_url = "http://localhost:11434/v1"
+
+# api_key: Optional API key (for secured Ollama deployments)
+# Env: ALFF_LLM_API_KEY
+# api_key = "..."
+
+# model: Override default model
+# Default: "llama3.1:8b-instruct"
+# model = "codellama:34b"
+
+# =============================================================================
+# [provider.lmstudio] - LM Studio Settings (local server)
+# =============================================================================
+
+[provider.lmstudio]
+# base_url: LM Studio API endpoint
+# Default: "http://127.0.0.1:1234/v1"
+# base_url = "http://localhost:1234/v1"
+
+# model: Override model specifically for LM Studio
+# Takes precedence over [provider].model when using LM Studio
+# Useful when you use different models for different providers
+# model = "google/gemma-3-27b"
+
+# timeout: Override timeout for LM Studio
+# Takes precedence over [provider].timeout
+# timeout = 300
+
+# jit_ttl: JIT (Just-In-Time) model loading TTL in seconds
+# When set, ALF will request LM Studio to auto-load the model if not already loaded,
+# and keep it loaded for this many seconds of inactivity.
+# Env: ALFF_LLM_JIT_TTL
+# Set to 0 or omit to disable JIT loading (model must be pre-loaded)
+jit_ttl = 300  # 5 minutes
+
+# api_key: Optional API key (for secured LM Studio deployments)
+# api_key = "..."
+
+# NOTE: Context length must be set when loading the model in LM Studio.
+# The API doesn't support changing context length per-request.
+# Pre-load with larger context via CLI:
+#   lms load bytedance/seed-oss-36b --context-length 16384 --gpu 1
+# Or configure in LM Studio UI: My Models → gear icon → Context Length
+
+# =============================================================================
+# [provider.vllm] - vLLM Settings (local server)
+# =============================================================================
+
+# [provider.vllm]
+# base_url: vLLM API endpoint
+# Default: "http://127.0.0.1:8000/v1"
+# base_url = "http://localhost:8000/v1"
+
+# api_key: Optional API key
+# api_key = "..."
+
+# model: Model name (must match what's loaded in vLLM)
+# model = "meta-llama/Llama-3.1-8B-Instruct"
+
+# =============================================================================
+# [provider.localai] - LocalAI Settings (local server)
+# =============================================================================
+
+# [provider.localai]
+# base_url: LocalAI API endpoint
+# Default: "http://127.0.0.1:8080/v1"
+# base_url = "http://localhost:8080/v1"
+
+# api_key: Optional API key
+# api_key = "..."
+
+# model: Model name
+# model = "gpt-4"
+
+# =============================================================================
+# [lldb] - LLDB/DAP Debugger Settings
+# =============================================================================
+
+[lldb]
+# backend: LLDB communication backend
+# Options:
+#   "dap"      - (default) Use Debug Adapter Protocol via lldb-dap + MCP server
+#                Pros: IDE-compatible, full MCP tooling, works with all features
+#                Cons: ~10-50ms latency per operation due to socket I/O
+#   "sbapi"    - Use LLDB Python bindings directly
+#                Pros: ~100x faster for batch operations (microseconds vs milliseconds)
+#                Cons: Requires Xcode + system Python 3.9 (LLDB ABI compatibility)
+#   "lldb_mcp" - Use LLDB's native MCP protocol server
+#                Pros: Direct protocol communication, no DAP overhead
+#                Cons: Requires LLDB with MCP support (LLDB 20+)
+#
+# SBAPI Setup (macOS):
+#   1. Install Xcode (LLDB Python bindings are in the framework)
+#   2. Run: make setup-sbapi
+#   3. Use the lldb-python wrapper:
+#      bin/lldb-python -m alf.cli analyze triage --backend sbapi --binary /path/to/bin --crash /path/to/crash
+#
+# Native MCP Setup:
+#   1. Start LLDB with MCP server:
+#      (lldb) protocol-server start MCP listen://localhost:59999
+#   2. Use: alf analyze triage --backend lldb_mcp --mcp-port 59999 ...
+#
+# Note: SBAPI requires system Python 3.9 because Xcode's LLDB bindings are
+# compiled for Python 3.9. The bin/lldb-python wrapper handles this automatically.
+#
+# Default: "dap"
+backend = "dap"
+
+# dap_path: Path to lldb-dap binary
+# Env: LLDB_DAP_BIN
+# Auto-detection order:
+#   1. This config value
+#   2. LLDB_DAP_BIN env var
+#   3. xcrun --find lldb-dap (macOS Xcode)
+#   4. lldb-dap in PATH
+#   5. /opt/homebrew/opt/llvm/bin/lldb-dap (Homebrew LLVM)
+#   6. /usr/local/opt/llvm/bin/lldb-dap (Homebrew LLVM x86)
+#   7. /usr/bin/lldb-dap (system)
+dap_path = "/opt/homebrew/opt/llvm/bin/lldb-dap"
+
+# timeout: DAP request timeout in seconds
+# Default: 30
+timeout = 30
+
+# spawn_dap: Whether to spawn lldb-dap subprocess automatically
+# Default: true
+# Set to false if you want to connect to an existing lldb-dap instance
+spawn_dap = true
+
+# dap_host: Host to connect to when spawn_dap = false
+# Default: "127.0.0.1"
+# dap_host = "127.0.0.1"
+
+# dap_port: Port to connect to when spawn_dap = false
+# Default: 0 (auto-select when spawning)
+# dap_port = 12345
+
+# remote_url: Remote debugging URL (for iOS/remote targets)
+# Format: "lldb://host:port" or "gdb://host:port"
+# Example: "lldb://192.168.1.100:1234"
+# remote_url = "lldb://192.168.1.100:1234"
+
+# remote_platform: LLDB platform for remote debugging
+# Examples: "remote-ios", "remote-macosx", "remote-linux"
+# remote_platform = "remote-ios"
+
+# mcp_host: Host for native LLDB MCP server (for lldb_mcp backend)
+# Default: "127.0.0.1"
+# mcp_host = "127.0.0.1"
+
+# mcp_port: Port for native LLDB MCP server (for lldb_mcp backend)
+# Default: 59999
+# mcp_port = 59999
+
+# =============================================================================
+# [fuzz] - Fuzzing Agent Settings
+# =============================================================================
+
+[fuzz]
+# max_iterations: Maximum fuzzing iterations before stopping
+# Each iteration = launch target with one input and collect result
+# Default: 100
+max_iterations = 100
+
+# max_turns: Maximum LLM interaction turns per iteration
+# Each turn = one LLM response with potential tool calls
+# Default: 12
+max_turns = 12
+
+# timeout: LLM request timeout in seconds
+# Default: 180
+# timeout = 180
+
+# write_corpus: Write generated corpus seeds to disk
+# Default: true
+write_corpus = true
+
+# write_crashes: Write unique crash inputs to disk
+# Default: true
+write_crashes = true
+
+# generate_corpus: Generate new seeds from crash analysis
+# Default: true
+generate_corpus = true
+
+# use_llm_corpus: Use LLM for intelligent corpus generation
+# Slower but produces smarter mutations based on crash context
+# Default: false
+use_llm_corpus = false
+
+# max_corpus_size: Maximum number of corpus entries to maintain
+# Limits memory usage and prevents corpus explosion
+# Default: 1000
+max_corpus_size = 1000
+
+# synthesize_initial_seeds: Generate initial seeds from binary analysis
+# Uses LLM to analyze the binary and create smart initial inputs
+# Default: false
+synthesize_initial_seeds = false
+
+# initial_seed_count: Number of initial seeds to synthesize
+# Only used when synthesize_initial_seeds = true
+# Default: 10
+initial_seed_count = 10
+
+# =============================================================================
+# [fuzz.libfuzzer] - libFuzzer-specific Settings
+# =============================================================================
+
+[fuzz.libfuzzer]
+# max_total_time: Maximum fuzzing time in seconds (0 = unlimited)
+# Passed to libFuzzer as -max_total_time=N
+# Default: 0
+max_total_time = 0
+
+# max_len: Maximum input length in bytes (0 = auto)
+# Passed to libFuzzer as -max_len=N
+# Default: 0
+max_len = 0
+
+# jobs: Number of parallel fuzzing jobs
+# Passed to libFuzzer as -jobs=N -workers=N
+# Default: 1
+jobs = 1
+
+# print_final_stats: Print statistics when fuzzing completes
+# Default: true
+print_final_stats = true
+
+# extra_args: Additional arguments passed directly to libFuzzer
+# Example: ["-use_value_profile=1", "-detect_leaks=0"]
+# extra_args = []
+
+# =============================================================================
+# [director] - AI Director/Agent Settings
+# =============================================================================
+
+[director]
+# max_turns: Maximum LLM/tool interaction turns before stopping
+# Each "turn" is one LLM response that may call one or more tools.
+# Higher values allow more thorough analysis but use more tokens.
+#
+# Recommended values:
+#   3-5   - Quick triage (stack trace + basic context)
+#   10    - Standard analysis (default, good balance)
+#   20-30 - Deep analysis (root cause investigation, memory forensics)
+#   50+   - Exhaustive analysis (rare, for complex bugs)
+#
+# Examples:
+#   uv run alf director --max-turns 5  ...   # Quick triage
+#   uv run alf director --max-turns 30 ...   # Deep dive
+#
+# Default: 10
+max_turns = 10
+
+# mode: Operation mode
+# Options: "auto" (autonomous), "researcher" (human-in-the-loop)
+# Default: "auto"
+mode = "auto"
+
+# minimal_tools: Use minimal tool set (4 tools + tool_search)
+# Useful for models with small context windows (4K-8K tokens)
+# Default: false (use full essential tools ~10 tools)
+minimal_tools = false
+
+# write_corpus: Generate corpus seeds from crash analysis
+# Default: true
+write_corpus = true
+
+# write_dict: Generate fuzzing dictionary from crash analysis
+# Default: true
+write_dict = true
+
+# verbose: Enable verbose output (show tool calls and results)
+# Default: false
+verbose = false
+
+# =============================================================================
+# [paths] - Directory Paths
+# =============================================================================
+
+[paths]
+# corpus_dir: Directory for fuzzing corpus/seeds
+# Default: "./corpora"
+corpus_dir = "./corpora"
+
+# crashes_dir: Directory for crash inputs
+# Default: "./crashes"
+crashes_dir = "./crashes"
+
+# logs_dir: Directory for logs and analysis output
+# Default: "./logs"
+logs_dir = "./logs"
+
+# =============================================================================
+# Environment Variables Reference
+# =============================================================================
+#
+# Provider:
+#   ALF_LLM_PROVIDER    - Override provider name
+#   ALF_LLM_MODEL       - Override model name
+#   ALF_LLM_BASE_URL    - Override base URL (for local servers)
+#   ALF_LLM_API_KEY     - API key (generic, for local servers)
+#   ALF_LLM_TIMEOUT     - Request timeout
+#   ALF_LLM_JIT_TTL     - LM Studio JIT loading TTL
+#
+# Provider-specific API keys (preferred):
+#   ANTHROPIC_API_KEY    - Anthropic/Claude API key
+#   OPENAI_API_KEY       - OpenAI API key
+#   OPENAI_BASE_URL      - OpenAI-compatible API base URL
+#   GOOGLE_API_KEY       - Google API key
+#   GEMINI_API_KEY       - Gemini API key (alias for GOOGLE_API_KEY)
+#
+# Google Cloud (Vertex AI):
+#   GOOGLE_GENAI_USE_VERTEXAI  - Use Vertex AI instead of Google AI Studio
+#   GOOGLE_CLOUD_PROJECT       - GCP project ID (required for Vertex AI)
+#   GOOGLE_CLOUD_LOCATION      - GCP region (default: us-central1)
+#
+# LLDB:
+#   LLDB_DAP_BIN         - Path to lldb-dap binary
+#
+# Instrumentation:
+#   ALF_PAC_MASK         - PAC bit mask for address normalization (default: 0x0000ffffffffffff)
+#
+# Output:
+#   ALF_MINIMIZE_OUTPUT  - Override output path for minimized crashes
+#
+# Legacy (still supported):
+#   LLDB_MCP_MODEL       - Model name (deprecated, use ALF_LLM_MODEL)
+#
+# =============================================================================
