@@ -131,6 +131,7 @@ Copy `.alf.toml` to your project root and customize. Key settings:
 - `docs/QUICKSTART_MCP.md` - MCP server setup
 - `docs/JACKALOPE.md` - Jackalope/TinyInst integration guide
 - `examples/README.md` - Example harnesses
+- `skills/README.md` - Claude / Claude Code skills for driving alf
 
 ## License
 
