@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from ._common import Tool, ToolParameter, json
 
@@ -17,12 +17,63 @@ if TYPE_CHECKING:
 # =============================================================================
 
 
+_LOOKUP_ADDR_RE = re.compile(r"Address:\s+(\S+)\[(0x[0-9a-fA-F]+)\]")
+_LOOKUP_SUMMARY_PREFIX = "Summary:"
+# Trailing " + <digits>" offset suffix that lldb appends to symbol names.
+_LOOKUP_OFFSET_SUFFIX_RE = re.compile(r"\s+\+\s+(\d+)\s*$")
+
+
+def _parse_lookup_output(raw: str) -> list[dict[str, Any]]:
+    """Parse `image lookup -rn/-n` output into structured matches.
+
+    Symbol names can contain spaces, brackets, and operators
+    (Objective-C selectors like ``-[NSApplication run]``, C++
+    templates), so the parser captures everything between the module
+    backtick and an optional trailing ``+ <offset>`` suffix — it does
+    not stop at the first whitespace.
+    """
+    matches: list[dict[str, Any]] = []
+    module_path: str | None = None
+    addr: str | None = None
+    for line in raw.splitlines():
+        stripped = line.strip()
+        addr_match = _LOOKUP_ADDR_RE.search(stripped)
+        if addr_match:
+            module_path = addr_match.group(1)
+            addr = addr_match.group(2)
+            continue
+        if addr is None or not stripped.startswith(_LOOKUP_SUMMARY_PREFIX):
+            continue
+        summary = stripped[len(_LOOKUP_SUMMARY_PREFIX) :].strip()
+        if "`" not in summary:
+            continue
+        module, remainder = summary.split("`", 1)
+        offset: int | None = None
+        offset_match = _LOOKUP_OFFSET_SUFFIX_RE.search(remainder)
+        if offset_match:
+            offset = int(offset_match.group(1))
+            remainder = remainder[: offset_match.start()]
+        entry: dict[str, Any] = {
+            "addr": addr,
+            "module": module,
+            "module_path": module_path,
+            "name": remainder.rstrip(),
+        }
+        if offset is not None:
+            entry["offset"] = offset
+        matches.append(entry)
+        addr = None
+        module_path = None
+    return matches
+
+
 def _lldb_lookup_symbol_handler(
     director: LLDBDirector,
     *,
     query: str,
     regex_search: bool = True,
     max_results: int = 200,
+    as_json: bool = False,
 ) -> str:
     """Look up symbols in loaded images."""
     if regex_search:
@@ -30,6 +81,21 @@ def _lldb_lookup_symbol_handler(
     else:
         cmd = f"image lookup -n '{query}'"
     out = director.execute_lldb_command(cmd)
+
+    if as_json:
+        parsed = _parse_lookup_output(out)
+        limit = max_results if max_results and max_results > 0 else len(parsed)
+        truncated = len(parsed) > limit
+        return json.dumps(
+            {
+                "query": query,
+                "regex": regex_search,
+                "matches": parsed[:limit],
+                "truncated": truncated,
+            },
+            indent=2,
+        )
+
     if max_results and max_results > 0:
         lines = out.splitlines()
         if len(lines) > max_results:
@@ -112,7 +178,9 @@ LLDB_LOOKUP_SYMBOL = Tool(
     description=(
         "Look up symbols in loaded images by name or regex pattern. "
         "Searches all loaded modules for matching symbol names. "
-        "Returns symbol addresses and module information."
+        "Returns raw `image lookup` output by default; set as_json=True "
+        "for a structured list of {addr, module, name, offset} matches "
+        "suitable for kernel-debug automation."
     ),
     parameters=[
         ToolParameter(
@@ -130,9 +198,19 @@ LLDB_LOOKUP_SYMBOL = Tool(
         ToolParameter(
             name="max_results",
             type="integer",
-            description="Maximum lines of output to return",
+            description="Maximum matches (as_json) or output lines to return",
             required=False,
             default=200,
+        ),
+        ToolParameter(
+            name="as_json",
+            type="boolean",
+            description=(
+                "When True, parse `image lookup` output into a JSON list of "
+                "{addr, module, name, offset} entries"
+            ),
+            required=False,
+            default=False,
         ),
     ],
     handler=_lldb_lookup_symbol_handler,

@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from ..backend import LLDBBackend
+from ..backend.base import BackendUnsupportedError
 from ..backend.factory import get_backend
 from ..triage.dap import DAPSession
 from .runtime.memory import strip_pac, try_parse_address
@@ -174,7 +175,6 @@ class LLDBDirector:
         if not self._is_crash_reason(reason):
             return
 
-        # Build stop event dict for existing _record_stop_event
         stopped_event = {
             "body": {
                 "reason": reason,
@@ -225,7 +225,11 @@ class LLDBDirector:
 
         # Sync state from backend
         self._sync_from_backend()
-        self.last_launch = {"binary": binary, "crash_input": crash_input}
+        self.last_launch = {
+            "binary": binary,
+            "crash_input": crash_input,
+            "mode": self._backend.SESSION_KIND_LAUNCH,
+        }
 
         # Record any crash stop events
         if result.status == "stopped" and result.reason:
@@ -259,7 +263,11 @@ class LLDBDirector:
 
         # Sync state from backend
         self._sync_from_backend()
-        self.last_launch = {"pid": int(pid), "program": program, "mode": "attach"}
+        self.last_launch = {
+            "pid": int(pid),
+            "program": program,
+            "mode": self._backend.SESSION_KIND_ATTACH,
+        }
 
         # Record any crash stop events
         if result.status == "stopped" and result.reason:
@@ -279,6 +287,71 @@ class LLDBDirector:
             return {"status": "terminated"}
         return {"status": "running"}
 
+    def gdb_remote_session(
+        self,
+        host: str,
+        port: int,
+        target: str | None = None,
+        arch: str | None = None,
+        plugin: str | None = None,
+    ) -> dict[str, Any]:
+        """Attach to a gdb-remote stub (e.g. VZ hypervisor).
+
+        Mirrors attach_session shape but delegates to
+        `LLDBBackend.attach_gdb_remote`. On failure the DAP session is
+        torn down and director state is left pristine so follow-up tools
+        see an actionable "no session" error rather than a half-open
+        adapter.
+        """
+        try:
+            result = self._backend.attach_gdb_remote(
+                host=host,
+                port=int(port),
+                target=target,
+                arch=arch,
+                plugin=plugin,
+            )
+        except BackendUnsupportedError as e:
+            return {"error": str(e)}
+        except Exception as e:  # noqa: BLE001
+            try:
+                self._backend.disconnect()
+            except Exception:  # noqa: BLE001
+                pass
+            return {"error": str(e)}
+
+        if result.status == "error":
+            try:
+                self._backend.disconnect()
+            except Exception:  # noqa: BLE001
+                pass
+            out: dict[str, Any] = {"status": "error", "error": result.error}
+            if result.hint:
+                out["hint"] = result.hint
+            return out
+
+        self._sync_from_backend()
+        self.last_launch = {
+            "host": host,
+            "port": int(port),
+            "program": target,
+            "arch": arch,
+            "plugin": plugin,
+            "mode": self._backend.SESSION_KIND_GDB_REMOTE,
+        }
+
+        if result.status == "stopped" and result.reason:
+            self._record_stop_from_backend()
+
+        if result.status == "stopped":
+            return {
+                "status": "stopped",
+                "thread_id": self.thread_id,
+                "frame_id": self.frame_id,
+                "reason": result.reason,
+            }
+        return {"status": result.status or "running"}
+
     def load_core_session(self, core_path: str, program: str | None = None) -> dict[str, Any]:
         """Load a core file for post-mortem analysis.
 
@@ -288,7 +361,11 @@ class LLDBDirector:
 
         # Sync state from backend
         self._sync_from_backend()
-        self.last_launch = {"core_file": core_path, "program": program, "mode": "core"}
+        self.last_launch = {
+            "core_file": core_path,
+            "program": program,
+            "mode": self._backend.SESSION_KIND_CORE,
+        }
 
         # Record any crash stop events
         if result.status == "stopped" and result.reason:
@@ -369,9 +446,24 @@ class LLDBDirector:
             return "Error: No active session"
         return self._backend.evaluate(expression, frame_id=frame_id)
 
+    _NO_SESSION_ERROR = (
+        "Error: No active session. Call lldb_launch, lldb_attach, "
+        "lldb_load_core, or lldb_gdb_remote first."
+    )
+    _SESSION_ENDED_ERROR = (
+        "Error: Session ended - the debug session has terminated. "
+        "Analyze the data you already collected."
+    )
+
+    def _no_session_error(self) -> str:
+        """Return an actionable error based on whether a session ever existed."""
+        if not self.last_launch:
+            return self._NO_SESSION_ERROR
+        return self._SESSION_ENDED_ERROR
+
     def execute_lldb_command(self, command: str) -> str:
         if not self._backend.connected:
-            return "Error: Session ended - the debug session has terminated. Analyze the data you already collected."
+            return self._no_session_error()
         return self._backend.execute_command(command)
 
     def continue_exec(
@@ -382,7 +474,7 @@ class LLDBDirector:
     ) -> str:
         """Continue execution, delegating to DAPBackend."""
         if not self._backend.connected:
-            return "Error: Session ended - the debug session has terminated. Analyze the data you already collected."
+            return self._no_session_error()
 
         try:
             stop_event = self._backend.continue_execution(
@@ -423,9 +515,25 @@ class LLDBDirector:
         file: str | None = None,
         line: int | None = None,
         condition: str | None = None,
+        static_addr: str | None = None,
+        module: str | None = None,
     ) -> str:
+        if static_addr and not address:
+            base = try_parse_address(static_addr)
+            if base is None:
+                return f"Error: invalid static_addr '{static_addr}'"
+            try:
+                slide = self._backend.get_module_slide(module)
+            except BackendUnsupportedError as e:
+                return f"Error: {e}"
+            if slide is None:
+                return (
+                    f"Error: could not determine module slide for "
+                    f"{module or 'main image'}. Call lldb_slide to inspect."
+                )
+            address = f"0x{(base + slide):x}"
         if not function and not address and not (file and line):
-            return "Error: provide function, address, or file+line"
+            return "Error: provide function, address, file+line, or static_addr"
         parts = ["breakpoint set"]
         if function:
             parts += ["--name", function]
@@ -499,6 +607,23 @@ class LLDBDirector:
             },
             indent=2,
         )
+
+    def terminate(self) -> dict[str, Any]:
+        """Tear down the current session, honoring session kind.
+
+        Launched / core sessions terminate the inferior; attach and
+        gdb-remote sessions detach so the remote inferior keeps running.
+        """
+        mode = self.last_launch.get("mode") if self.last_launch else None
+        detached = not self._backend.should_terminate_debuggee()
+        try:
+            self._backend.disconnect()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("backend.disconnect() raised: %s", e)
+        self.thread_id = None
+        self.frame_id = None
+        self.last_stop_event = None
+        return {"status": "terminated", "mode": mode, "detached": detached}
 
     def status(self) -> dict[str, Any]:
         return {
@@ -652,3 +777,119 @@ class LLDBDirector:
             return self._backend.read_memory(address, count), None
         except Exception as e:
             return None, str(e)
+
+    def add_module(
+        self,
+        path: str,
+        dsym: str | None = None,
+        slide: int | None = None,
+        load_addr: int | None = None,
+    ) -> dict[str, Any]:
+        """Add a module (and optional dSYM) to the current target."""
+        if not self._backend.connected:
+            return {"error": self._no_session_error()}
+        try:
+            return self._backend.add_module(
+                path=path,
+                dsym=dsym,
+                slide=slide,
+                load_addr=load_addr,
+            )
+        except BackendUnsupportedError as e:
+            return {"error": str(e)}
+        except Exception as e:  # noqa: BLE001
+            return {"error": str(e)}
+
+    def image_slide(self, module: str | None = None) -> dict[str, Any]:
+        """Return slide info for a module via the backend."""
+        if not self._backend.connected:
+            return {"error": self._no_session_error()}
+        try:
+            slide = self._backend.get_module_slide(module)
+        except BackendUnsupportedError as e:
+            return {"error": str(e)}
+        except Exception as e:  # noqa: BLE001
+            return {"error": str(e)}
+        if slide is None:
+            return {"error": f"could not determine slide for {module or 'main image'}"}
+        return {"module": module, "slide": f"0x{slide:x}", "slide_int": slide}
+
+    def load_xnu_macros(self, path: str | None = None) -> dict[str, Any]:
+        """Resolve and import Apple xnu lldbmacros into the debug session."""
+        if not self._backend.connected:
+            return {"error": self._no_session_error()}
+
+        from ..utils.xnu import find_lldbmacros
+
+        resolved = find_lldbmacros(path)
+        if resolved is None:
+            return {
+                "loaded": False,
+                "error": (
+                    "xnu lldbmacros not found. Provide path= or set "
+                    "ALF_XNU_LLDBMACROS, or install a KDK."
+                ),
+            }
+
+        script_path = resolved / "xnu.py"
+        out = self.execute_lldb_command(f"command script import {script_path}")
+        loaded = "error" not in out.lower()
+        commands_added = sum(1 for ln in out.splitlines() if "command" in ln.lower())
+        return {
+            "loaded": loaded,
+            "path": str(resolved),
+            "script": str(script_path),
+            "commands_added": commands_added,
+            "output": out,
+        }
+
+    def write_memory_atomic(
+        self,
+        address: str,
+        data: bytes,
+        resume: bool = True,
+    ) -> dict[str, Any]:
+        """Atomic interrupt → write → resume memory mutation.
+
+        `resume=True` is the kernel-debug pattern: interrupt the target just
+        long enough to write bytes, then let it run again. Explicit running
+        state check avoids relying on sticky last_stop_event.
+        """
+        if not self._backend.connected:
+            return {"error": self._no_session_error()}
+
+        was_running = False
+        interrupted = False
+        if resume:
+            try:
+                was_running = self._backend.is_running()
+            except BackendUnsupportedError:
+                was_running = False
+            if was_running:
+                try:
+                    self._backend.interrupt()
+                    interrupted = True
+                except BackendUnsupportedError as e:
+                    return {"error": f"backend cannot interrupt: {e}"}
+                except Exception as e:  # noqa: BLE001
+                    return {"error": f"interrupt failed: {e}"}
+
+        try:
+            written = self._backend.write_memory(address, data)
+        except BackendUnsupportedError as e:
+            return {"error": f"backend cannot write memory: {e}"}
+        except Exception as e:  # noqa: BLE001
+            return {"error": f"write failed: {e}"}
+        finally:
+            if interrupted:
+                try:
+                    self._backend.continue_execution(wait=False)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("resume after atomic write failed: %s", e)
+
+        self._sync_from_backend()
+        return {
+            "bytes_written": written,
+            "resumed": interrupted,
+            "was_running": was_running,
+        }

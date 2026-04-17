@@ -5,7 +5,7 @@ Mock LLDB backend for testing and verification without native tools.
 from __future__ import annotations
 
 import logging
-import time
+import os
 from typing import Any
 
 from .base import (
@@ -234,3 +234,73 @@ class MockBackend(LLDBBackend):
         frame_id: int | None = None,
     ) -> Any:
         return f"MockEval({expression})"
+
+    # =========================================================================
+    # Kernel / remote helpers (deterministic stubs)
+    # =========================================================================
+
+    def attach_gdb_remote(
+        self,
+        host: str,
+        port: int,
+        target: str | None = None,
+        arch: str | None = None,
+        plugin: str | None = None,
+    ) -> LaunchResult:
+        self.connect()
+        self.last_launch = {
+            "host": host,
+            "port": int(port),
+            "program": target,
+            "arch": arch,
+            "plugin": plugin,
+            "mode": self.SESSION_KIND_GDB_REMOTE,
+        }
+        self.last_stop_event = StopEvent(
+            reason="signal",
+            thread_id=1,
+            frame_id=0,
+            description=f"Mock gdb-remote attach to {host}:{port}",
+            all_threads_stopped=True,
+        )
+        return LaunchResult(status="stopped", thread_id=1, frame_id=0, reason="signal")
+
+    def add_module(
+        self,
+        path: str,
+        dsym: str | None = None,
+        slide: int | None = None,
+        load_addr: int | None = None,
+    ) -> dict[str, Any]:
+        basename = os.path.basename(path)
+        return {
+            "module": basename,
+            "path": path,
+            "dsym": dsym,
+            "loaded": True,
+            "output": f"Mock add_module({path}, dsym={dsym}, slide={slide}, load_addr={load_addr})",
+        }
+
+    def get_module_slide(self, module: str | None = None) -> int | None:
+        return 0x100000
+
+    def write_memory(self, address: int | str, data: bytes) -> int:
+        if isinstance(address, str):
+            key = int(address, 16) if address.lower().startswith("0x") else 0
+        else:
+            key = int(address)
+        self._mock_memory[key] = bytes(data)
+        return len(data)
+
+    def interrupt(self, timeout: float | None = None) -> StopEvent | None:
+        self.last_stop_event = StopEvent(
+            reason="signal",
+            thread_id=1,
+            frame_id=0,
+            description="Mock interrupt",
+            all_threads_stopped=True,
+        )
+        return self.last_stop_event
+
+    def is_running(self) -> bool:
+        return self.last_stop_event is None

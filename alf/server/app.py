@@ -16,9 +16,7 @@ import argparse
 import asyncio
 import json
 import logging
-import os
 import platform
-import shutil
 import socket
 import subprocess
 import weakref
@@ -112,19 +110,49 @@ def _free_port(host: str = "127.0.0.1") -> int:
 
 
 def _find_lldb_dap(explicit: str | None) -> str:
-    if explicit:
-        return explicit
-    env_bin = os.environ.get("LLDB_DAP_BIN")
-    if env_bin:
-        return env_bin
-    if shutil.which("xcrun"):
+    from ..utils.lldb_dap import find_lldb_dap
+
+    return find_lldb_dap(explicit)
+
+
+def _wait_for_port(
+    host: str,
+    port: int,
+    proc: subprocess.Popen[str] | None = None,
+    budget_seconds: float = 5.0,
+    interval_seconds: float = 0.1,
+) -> tuple[bool, str]:
+    """Poll until `host:port` accepts TCP connections or the budget expires.
+
+    If the child process exits during the wait, stop early and return the
+    captured stderr. Returns (ready, detail).
+    """
+    import time
+
+    attempts = max(1, int(budget_seconds / max(interval_seconds, 0.01)))
+    last_err: str = ""
+    for _ in range(attempts):
+        if proc is not None and proc.poll() is not None:
+            err = ""
+            if proc.stderr is not None:
+                try:
+                    err = proc.stderr.read() or ""
+                except Exception:  # noqa: BLE001
+                    err = ""
+            return False, (
+                f"lldb-dap exited with code {proc.returncode} before binding "
+                f"{host}:{port}. stderr: {err.strip() or '<empty>'}"
+            )
         try:
-            out = subprocess.check_output(["xcrun", "--find", "lldb-dap"], text=True).strip()
-            if out:
-                return out
-        except Exception:
-            pass
-    return "lldb-dap"
+            with socket.create_connection((host, port), timeout=interval_seconds):
+                return True, f"listening on {host}:{port}"
+        except OSError as err:
+            last_err = str(err)
+            time.sleep(interval_seconds)
+    return False, (
+        f"timed out after {budget_seconds:.1f}s waiting for lldb-dap at "
+        f"{host}:{port} (last error: {last_err or 'unknown'})"
+    )
 
 
 def build_mcp(director: LLDBDirector, host: str = "127.0.0.1", port: int = 8000) -> FastMCP:
@@ -309,16 +337,37 @@ def main(argv: list[str] | None = None) -> None:
                 if dap_port <= 0:
                     dap_port = _free_port(dap_host)
                 logger.info("Starting lldb-dap (%s) on %s:%s", dap_bin, dap_host, dap_port)
+                # Current lldb-dap (Xcode 16+, LLVM 20+) uses `--connection
+                # listen://host:port`. `--port` silently exits on these builds,
+                # which used to hide itself behind a failed TCP connect later.
                 dap_proc = subprocess.Popen(
-                    [dap_bin, "--port", str(dap_port)],
+                    [
+                        dap_bin,
+                        "--connection",
+                        f"listen://{dap_host}:{dap_port}",
+                    ],
                     stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
                     text=True,
                 )
+                ready, detail = _wait_for_port(dap_host, dap_port, proc=dap_proc)
+                if not ready:
+                    raise SystemExit(
+                        f"lldb-dap readiness check failed: {detail}. "
+                        f"Check that '{dap_bin}' is signed and executable, that "
+                        f"port {dap_port} is free, and run `uv run alf doctor`."
+                    )
+                logger.debug("lldb-dap readiness OK: %s", detail)
             else:
                 if dap_port <= 0:
                     raise SystemExit("--dap-port is required when --no-spawn-dap is set")
-            
+                ready, detail = _wait_for_port(dap_host, dap_port, budget_seconds=2.0)
+                if not ready:
+                    raise SystemExit(
+                        f"lldb-dap not reachable at {dap_host}:{dap_port}: {detail}. "
+                        f"Start it with: xcrun lldb-dap --port {dap_port}"
+                    )
+
             backend = get_backend("dap", host=dap_host, port=dap_port, timeout=args.timeout)
 
         elif args.backend == "mock":

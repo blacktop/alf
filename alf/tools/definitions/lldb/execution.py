@@ -53,14 +53,23 @@ def _lldb_set_breakpoint_handler(
     file: str | None = None,
     line: int | None = None,
     condition: str | None = None,
+    static_addr: str | None = None,
+    module: str | None = None,
 ) -> str:
-    """Set a breakpoint by function name, address, or source location."""
+    """Set a breakpoint by function name, address, or source location.
+
+    `static_addr`/`module` resolve a link-time address against the runtime
+    module slide, which is how kernel-debug breakpoints are typically set
+    (disassembly addresses don't account for KASLR).
+    """
     return director.set_breakpoint(
         function=function,
         address=address,
         file=file,
         line=line,
         condition=condition,
+        static_addr=static_addr,
+        module=module,
     )
 
 
@@ -207,8 +216,11 @@ LLDB_SET_BREAKPOINT = Tool(
     name="lldb_set_breakpoint",
     description=(
         "Set a breakpoint by function name, address, or source location. "
-        "Specify one of: function name, address, or file+line combination. "
-        "Optional condition makes it a conditional breakpoint."
+        "Specify one of: function name, address, file+line, or "
+        "static_addr(+module). Optional condition makes it conditional. "
+        "Use static_addr when setting breakpoints from link-time addresses "
+        "in disassembly (e.g. a kernel symbol at 0xfffffe000a5ec4c8) — alf "
+        "resolves the runtime slide automatically."
     ),
     parameters=[
         ToolParameter(
@@ -220,7 +232,7 @@ LLDB_SET_BREAKPOINT = Tool(
         ToolParameter(
             name="address",
             type="string",
-            description="Memory address to break on (e.g., '0x1000')",
+            description="Runtime memory address to break on (e.g., '0x1000')",
             required=False,
         ),
         ToolParameter(
@@ -239,6 +251,24 @@ LLDB_SET_BREAKPOINT = Tool(
             name="condition",
             type="string",
             description="Conditional expression (break only when true)",
+            required=False,
+        ),
+        ToolParameter(
+            name="static_addr",
+            type="string",
+            description=(
+                "Link-time address; resolved to runtime via the module "
+                "slide. Typical for kernel breakpoints from disassembly."
+            ),
+            required=False,
+        ),
+        ToolParameter(
+            name="module",
+            type="string",
+            description=(
+                "Module basename (e.g. 'kernel.release.vmapple') used with "
+                "static_addr to pick the right slide."
+            ),
             required=False,
         ),
     ],

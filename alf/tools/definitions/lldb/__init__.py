@@ -51,9 +51,17 @@ from .inspection import (
     LLDB_THREAD_LIST,
     LLDB_THREAD_SELECT,
 )
+from .kernel import (
+    KERNEL_TOOLS,
+    LLDB_ADD_MODULE,
+    LLDB_LOAD_XNU_MACROS,
+    LLDB_SLIDE,
+    LLDB_WRITE_MEMORY,
+)
 from .scripting import LLDB_SCRIPT, SCRIPTING_TOOLS
 from .session import (
     LLDB_ATTACH,
+    LLDB_GDB_REMOTE,
     LLDB_HELP,
     LLDB_KILL,
     LLDB_LAUNCH,
@@ -83,6 +91,7 @@ LLDB_TOOLS = [
     # Core session management
     LLDB_LAUNCH,
     LLDB_ATTACH,
+    LLDB_GDB_REMOTE,
     LLDB_LOAD_CORE,
     LLDB_STATUS,
     LLDB_PROCESS_INFO,
@@ -127,6 +136,11 @@ LLDB_TOOLS = [
     LLDB_READ_SOURCE,
     # Scripting
     LLDB_SCRIPT,
+    # Kernel / remote debugging
+    LLDB_ADD_MODULE,
+    LLDB_SLIDE,
+    LLDB_LOAD_XNU_MACROS,
+    LLDB_WRITE_MEMORY,
     # Input control validation (Phase 1 dynamic tracing)
     LLDB_VALIDATE_INPUT_CONTROL,
 ]
@@ -136,6 +150,7 @@ __all__ = [
     # Individual tools - Core session
     "LLDB_LAUNCH",
     "LLDB_ATTACH",
+    "LLDB_GDB_REMOTE",
     "LLDB_LOAD_CORE",
     "LLDB_STATUS",
     "LLDB_PROCESS_INFO",
@@ -180,6 +195,11 @@ __all__ = [
     "LLDB_READ_SOURCE",
     # Individual tools - Scripting
     "LLDB_SCRIPT",
+    # Individual tools - Kernel / remote
+    "LLDB_ADD_MODULE",
+    "LLDB_SLIDE",
+    "LLDB_LOAD_XNU_MACROS",
+    "LLDB_WRITE_MEMORY",
     # Individual tools - Input control validation
     "LLDB_VALIDATE_INPUT_CONTROL",
     # Tool lists by category
@@ -189,6 +209,7 @@ __all__ = [
     "CRASH_ANALYSIS_TOOLS",
     "SYMBOL_TOOLS",
     "SCRIPTING_TOOLS",
+    "KERNEL_TOOLS",
     "VALIDATION_TOOLS",
     # Combined tool list
     "LLDB_TOOLS",

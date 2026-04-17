@@ -372,11 +372,13 @@ class LLDBMCPBackend(LLDBBackend):
 
         Note: This does NOT quit LLDB - it just closes the socket connection.
         The LLDB session remains available for reconnection or manual use.
+        Launched processes are killed; attached / gdb-remote processes are
+        detached so a remote inferior keeps running after teardown.
         """
         if self._socket:
+            command = "process kill" if self.should_terminate_debuggee() else "process detach"
             try:
-                # Kill any running process first to avoid "Quitting will kill processes" prompt
-                self._lldb_command("process kill")
+                self._lldb_command(command)
             except Exception:
                 pass
             # Don't send quit - let the LLDB session stay running for reuse
@@ -403,7 +405,12 @@ class LLDBMCPBackend(LLDBBackend):
         if not self.connected:
             raise ConnectionError("Not connected to MCP server")
 
-        self.last_launch = {"binary": binary, "args": args, "crash_input": crash_input}
+        self.last_launch = {
+            "binary": binary,
+            "args": args,
+            "crash_input": crash_input,
+            "mode": self.SESSION_KIND_LAUNCH,
+        }
 
         # Build target
         output = self._lldb_command(f'target create "{binary}"')
@@ -499,6 +506,12 @@ class LLDBMCPBackend(LLDBBackend):
         if not self.connected:
             raise ConnectionError("Not connected to MCP server")
 
+        self.last_launch = {
+            "pid": int(pid),
+            "program": program,
+            "mode": self.SESSION_KIND_ATTACH,
+        }
+
         if program:
             self._lldb_command(f'target create "{program}"')
 
@@ -517,6 +530,12 @@ class LLDBMCPBackend(LLDBBackend):
         """Load a core file for post-mortem analysis."""
         if not self.connected:
             raise ConnectionError("Not connected to MCP server")
+
+        self.last_launch = {
+            "core_file": core_path,
+            "program": program,
+            "mode": self.SESSION_KIND_CORE,
+        }
 
         if program:
             self._lldb_command(f'target create "{program}"')

@@ -166,9 +166,20 @@ class SBAPIBackend(LLDBBackend):
         logger.info("SBAPI backend initialized")
 
     def disconnect(self) -> None:
-        """Terminate the debugger."""
+        """Terminate the debugger.
+
+        Mirrors the DAP backend's session-kind-aware teardown: launched
+        processes are killed, attached / gdb-remote processes are detached
+        so a remote inferior keeps running after we tear down the target.
+        """
         if self._process and self._process.IsValid():
-            self._process.Kill()
+            try:
+                if self.should_terminate_debuggee():
+                    self._process.Kill()
+                else:
+                    self._process.Detach()
+            except Exception:
+                pass
             self._process = None
 
         if self._target and self._target.IsValid():
@@ -234,7 +245,11 @@ class SBAPIBackend(LLDBBackend):
                 error=f"Failed to create target: {error.GetCString()}",
             )
 
-        self.last_launch = {"binary": binary, "crash_input": crash_input}
+        self.last_launch = {
+            "binary": binary,
+            "crash_input": crash_input,
+            "mode": self.SESSION_KIND_LAUNCH,
+        }
 
         # Build launch arguments
         launch_args: list[str] = []
@@ -318,7 +333,11 @@ class SBAPIBackend(LLDBBackend):
         if not self._target or not self._target.IsValid():
             return LaunchResult(status="error", error="Failed to create target")
 
-        self.last_launch = {"pid": pid, "program": program, "mode": "attach"}
+        self.last_launch = {
+            "pid": pid,
+            "program": program,
+            "mode": self.SESSION_KIND_ATTACH,
+        }
 
         # Attach
         error = lldb.SBError()
@@ -369,7 +388,11 @@ class SBAPIBackend(LLDBBackend):
         if not self._target or not self._target.IsValid():
             return LaunchResult(status="error", error="Failed to create target")
 
-        self.last_launch = {"core_file": core_path, "program": program, "mode": "core"}
+        self.last_launch = {
+            "core_file": core_path,
+            "program": program,
+            "mode": self.SESSION_KIND_CORE,
+        }
 
         # Load core
         self._process = self._target.LoadCore(core_path, error)

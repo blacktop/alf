@@ -75,6 +75,10 @@ class BreakpointResult:
     locations: list[dict[str, Any]] = field(default_factory=list)
 
 
+class BackendUnsupportedError(RuntimeError):
+    """Raised when a backend does not implement an optional capability."""
+
+
 class LLDBBackend(ABC):
     """Abstract base class for LLDB backends.
 
@@ -82,6 +86,13 @@ class LLDBBackend(ABC):
     The interface is designed to be minimal yet complete for fuzzing and
     crash analysis use cases.
     """
+
+    # Session-kind values recorded on last_launch["mode"] so teardown can
+    # distinguish between launched (owned) and attached (remote) inferiors.
+    SESSION_KIND_LAUNCH: str = "launch"
+    SESSION_KIND_ATTACH: str = "attach"
+    SESSION_KIND_CORE: str = "core"
+    SESSION_KIND_GDB_REMOTE: str = "gdb_remote"
 
     def __init__(self, timeout: float = 30.0):
         """Initialize the backend.
@@ -97,6 +108,10 @@ class LLDBBackend(ABC):
         self.frame_id: int | None = None
         self.breakpoints: list[str] = []
         self.last_launch: dict[str, Any] = {}
+
+        # Cached adapter capabilities from DAP `initialize` response (or
+        # equivalent). Populated by backends that support capability probing.
+        self.capabilities: dict[str, Any] = {}
 
         # Crash tracking
         self.seen_crash_hashes: set[str] = set()
@@ -386,7 +401,125 @@ class LLDBBackend(ABC):
             "thread_id": self.thread_id,
             "frame_id": self.frame_id,
             "breakpoints": self.breakpoints,
+            "mode": self.last_launch.get("mode"),
         }
+
+    def should_terminate_debuggee(self) -> bool:
+        """Return True when teardown should terminate the debuggee.
+
+        Launched / core-loaded sessions own the inferior and should kill it;
+        attach and gdb-remote sessions must detach so a remote inferior
+        keeps running.
+        """
+        return self.last_launch.get("mode") not in (
+            self.SESSION_KIND_ATTACH,
+            self.SESSION_KIND_GDB_REMOTE,
+        )
+
+    # =========================================================================
+    # Optional capability helpers (kernel / remote debugging)
+    # =========================================================================
+    #
+    # These are intentionally non-abstract. Backends that cannot support the
+    # operation raise BackendUnsupportedError with a clear message so callers
+    # can surface an actionable error instead of silently degrading.
+
+    def attach_gdb_remote(
+        self,
+        host: str,
+        port: int,
+        target: str | None = None,
+        arch: str | None = None,
+        plugin: str | None = None,
+    ) -> LaunchResult:
+        """Attach to a gdb-remote stub (e.g. VZ hypervisor, QEMU gdbstub).
+
+        Args:
+            host: gdb-remote host.
+            port: gdb-remote port.
+            target: Optional path to kernel/binary/dSYM for symbols.
+            arch: Optional architecture override (e.g. "arm64e").
+            plugin: Optional process plugin ("gdb-remote", "kdp-remote").
+
+        Returns:
+            LaunchResult after attach handshake.
+        """
+        raise BackendUnsupportedError(
+            f"{self.name} backend does not implement attach_gdb_remote"
+        )
+
+    def add_module(
+        self,
+        path: str,
+        dsym: str | None = None,
+        slide: int | None = None,
+        load_addr: int | None = None,
+    ) -> dict[str, Any]:
+        """Add a module and optional dSYM to the current target.
+
+        Args:
+            path: Path to the executable/kernel/kext.
+            dsym: Optional path to a companion dSYM bundle.
+            slide: Optional constant slide to apply when loading.
+            load_addr: Optional explicit load address (alternative to slide).
+
+        Returns:
+            Dict with at least "module" and "loaded" keys.
+        """
+        raise BackendUnsupportedError(
+            f"{self.name} backend does not implement add_module"
+        )
+
+    def get_module_slide(self, module: str | None = None) -> int | None:
+        """Return the runtime slide (load_addr - link_addr) for a module.
+
+        Args:
+            module: Module basename or path. None uses the main executable.
+
+        Returns:
+            Slide as an integer, or None if it cannot be determined.
+        """
+        raise BackendUnsupportedError(
+            f"{self.name} backend does not implement get_module_slide"
+        )
+
+    def write_memory(self, address: int | str, data: bytes) -> int:
+        """Write bytes to target memory.
+
+        Args:
+            address: Destination address (int or hex/sym string).
+            data: Raw bytes to write.
+
+        Returns:
+            Number of bytes written.
+        """
+        raise BackendUnsupportedError(
+            f"{self.name} backend does not implement write_memory"
+        )
+
+    def interrupt(self, timeout: float | None = None) -> StopEvent | None:
+        """Interrupt (pause) the running target.
+
+        Used for kernel debugging flows that need to briefly halt the guest
+        to read or write state and then resume. Backends that cannot halt
+        a running target raise BackendUnsupportedError.
+
+        Returns:
+            StopEvent captured after the interrupt, or None on timeout.
+        """
+        raise BackendUnsupportedError(
+            f"{self.name} backend does not implement interrupt"
+        )
+
+    def is_running(self) -> bool:
+        """Return True when the target appears to be executing.
+
+        Default uses last_stop_event as a hint; backends with explicit
+        process state should override.
+        """
+        if not self.connected:
+            return False
+        return self.last_stop_event is None
 
     def is_crash_reason(self, reason: str) -> bool:
         """Check if a stop reason indicates a crash.

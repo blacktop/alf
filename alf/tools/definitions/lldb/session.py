@@ -72,6 +72,29 @@ def _lldb_load_core_handler(
         return json.dumps({"error": str(e)}, indent=2)
 
 
+def _lldb_gdb_remote_handler(
+    director: LLDBDirector,
+    *,
+    port: int,
+    host: str = "127.0.0.1",
+    target: str | None = None,
+    arch: str | None = None,
+    plugin: str | None = None,
+) -> str:
+    """Attach to a gdb-remote stub (e.g. Virtualization.framework hypervisor)."""
+    try:
+        result = director.gdb_remote_session(
+            host=host,
+            port=int(port),
+            target=target,
+            arch=arch,
+            plugin=plugin,
+        )
+        return json.dumps(result, indent=2)
+    except Exception as e:  # noqa: BLE001
+        return json.dumps({"error": str(e)}, indent=2)
+
+
 def _lldb_status_handler(director: LLDBDirector) -> str:
     """Get current LLDB session status."""
     return json.dumps(director.status(), indent=2)
@@ -99,17 +122,13 @@ def _lldb_help_handler(
 
 
 def _lldb_terminate_handler(director: LLDBDirector) -> str:
-    """Terminate the LLDB debugging session cleanly."""
+    """Terminate the LLDB debugging session cleanly.
+
+    For attach and gdb-remote sessions this detaches so the remote
+    inferior keeps running; launched sessions still terminate the child.
+    """
     try:
-        if director.dap_session:
-            try:
-                director.dap_session.request("disconnect", {"terminateDebuggee": True})
-            except Exception:
-                pass
-        director.thread_id = None
-        director.frame_id = None
-        director.last_stop_event = None
-        return json.dumps({"status": "terminated", "message": "Debug session terminated"}, indent=2)
+        return json.dumps(director.terminate(), indent=2)
     except Exception as e:  # noqa: BLE001
         return json.dumps({"error": str(e)}, indent=2)
 
@@ -194,6 +213,61 @@ LLDB_ATTACH = Tool(
         ),
     ],
     handler=_lldb_attach_handler,
+    category="lldb",
+    requires_lock=True,
+)
+
+
+LLDB_GDB_REMOTE = Tool(
+    name="lldb_gdb_remote",
+    description=(
+        "Attach to a gdb-remote debug stub (Virtualization.framework "
+        "hypervisor, QEMU gdbstub, JTAG bridge, etc.). Required for any "
+        "kernel or firmware debugging workflow. Provide the target path so "
+        "symbols resolve against the right kernel/binary."
+    ),
+    parameters=[
+        ToolParameter(
+            name="port",
+            type="integer",
+            description="gdb-remote TCP port (e.g. 8864 for VZ hypervisor stub)",
+        ),
+        ToolParameter(
+            name="host",
+            type="string",
+            description="gdb-remote host",
+            required=False,
+            default="127.0.0.1",
+        ),
+        ToolParameter(
+            name="target",
+            type="string",
+            description=(
+                "Path to kernel or executable for symbol resolution "
+                "(e.g. KDK kernel.release.vmapple). Optional."
+            ),
+            required=False,
+        ),
+        ToolParameter(
+            name="arch",
+            type="string",
+            description=(
+                "Architecture override if the stub omits it (e.g. 'arm64e'). "
+                "Optional."
+            ),
+            required=False,
+        ),
+        ToolParameter(
+            name="plugin",
+            type="string",
+            description=(
+                "Process plugin: 'gdb-remote' (default) or 'kdp-remote'. "
+                "Optional."
+            ),
+            required=False,
+        ),
+    ],
+    handler=_lldb_gdb_remote_handler,
     category="lldb",
     requires_lock=True,
 )
@@ -308,6 +382,7 @@ LLDB_KILL = Tool(
 SESSION_TOOLS = [
     LLDB_LAUNCH,
     LLDB_ATTACH,
+    LLDB_GDB_REMOTE,
     LLDB_LOAD_CORE,
     LLDB_STATUS,
     LLDB_PROCESS_INFO,
@@ -319,6 +394,7 @@ SESSION_TOOLS = [
 __all__ = [
     "LLDB_LAUNCH",
     "LLDB_ATTACH",
+    "LLDB_GDB_REMOTE",
     "LLDB_LOAD_CORE",
     "LLDB_STATUS",
     "LLDB_PROCESS_INFO",

@@ -10,7 +10,9 @@ from __future__ import annotations
 import base64
 import hashlib
 import logging
+import os
 import re
+import shlex
 import time
 from typing import Any
 
@@ -96,13 +98,22 @@ class DAPBackend(LLDBBackend):
             self._session = DAPSession(host=self.host, port=self.port, timeout=self.timeout)
 
     def disconnect(self) -> None:
-        """Disconnect from lldb-dap."""
+        """Disconnect from lldb-dap.
+
+        Uses detach semantics (terminateDebuggee=False) for attach and
+        gdb-remote sessions so a remote inferior keeps running after we
+        disconnect. Launched sessions still terminate the child process.
+        """
         if self._session:
             try:
-                self._session.request("disconnect", {"terminateDebuggee": True})
+                self._session.request(
+                    "disconnect",
+                    {"terminateDebuggee": self.should_terminate_debuggee()},
+                )
             except Exception:
                 pass
             self._session = None
+            self.capabilities = {}
 
     def reset_target(self) -> bool:
         """Reset the current target without closing the DAP connection.
@@ -132,16 +143,7 @@ class DAPBackend(LLDBBackend):
 
         # Re-initialize the session for the next target
         try:
-            self._session.request(
-                "initialize",
-                {
-                    "clientID": "lldb-mcp",
-                    "adapterID": "lldb",
-                    "pathFormat": "path",
-                    "linesStartAt1": True,
-                    "columnsStartAt1": True,
-                },
-            )
+            self._handshake_initialize()
             return True
         except Exception as e:
             logger.warning("Failed to re-initialize DAP session: %s", e)
@@ -150,6 +152,27 @@ class DAPBackend(LLDBBackend):
     # =========================================================================
     # Session Management
     # =========================================================================
+
+    def _handshake_initialize(self) -> dict[str, Any]:
+        """Send DAP `initialize` and cache advertised capabilities.
+
+        Returns the response body (capabilities dict).
+        """
+        assert self._session is not None
+        resp = self._session.request(
+            "initialize",
+            {
+                "clientID": "lldb-mcp",
+                "adapterID": "lldb",
+                "pathFormat": "path",
+                "linesStartAt1": True,
+                "columnsStartAt1": True,
+            },
+        )
+        caps = resp.get("body", {}) or {}
+        if isinstance(caps, dict):
+            self.capabilities = dict(caps)
+        return self.capabilities
 
     def launch(
         self,
@@ -163,22 +186,16 @@ class DAPBackend(LLDBBackend):
         self.connect()
         assert self._session is not None
 
-        self.last_launch = {"binary": binary, "crash_input": crash_input}
+        self.last_launch = {
+            "binary": binary,
+            "crash_input": crash_input,
+            "mode": self.SESSION_KIND_LAUNCH,
+        }
         self.thread_id = None
         self.frame_id = None
         self.breakpoints = []
 
-        # Initialize
-        self._session.request(
-            "initialize",
-            {
-                "clientID": "lldb-mcp",
-                "adapterID": "lldb",
-                "pathFormat": "path",
-                "linesStartAt1": True,
-                "columnsStartAt1": True,
-            },
-        )
+        self._handshake_initialize()
 
         # Build launch arguments
         launch_args: list[str] = []
@@ -296,22 +313,16 @@ class DAPBackend(LLDBBackend):
         self.connect()
         assert self._session is not None
 
-        self.last_launch = {"pid": int(pid), "program": program, "mode": "attach"}
+        self.last_launch = {
+            "pid": int(pid),
+            "program": program,
+            "mode": self.SESSION_KIND_ATTACH,
+        }
         self.thread_id = None
         self.frame_id = None
         self.breakpoints = []
 
-        # Initialize
-        self._session.request(
-            "initialize",
-            {
-                "clientID": "lldb-mcp",
-                "adapterID": "lldb",
-                "pathFormat": "path",
-                "linesStartAt1": True,
-                "columnsStartAt1": True,
-            },
-        )
+        self._handshake_initialize()
 
         attach_args: dict[str, Any] = {
             "pid": int(pid),
@@ -364,22 +375,16 @@ class DAPBackend(LLDBBackend):
         self.connect()
         assert self._session is not None
 
-        self.last_launch = {"core_file": core_path, "program": program, "mode": "core"}
+        self.last_launch = {
+            "core_file": core_path,
+            "program": program,
+            "mode": self.SESSION_KIND_CORE,
+        }
         self.thread_id = None
         self.frame_id = None
         self.breakpoints = []
 
-        # Initialize
-        self._session.request(
-            "initialize",
-            {
-                "clientID": "lldb-mcp",
-                "adapterID": "lldb",
-                "pathFormat": "path",
-                "linesStartAt1": True,
-                "columnsStartAt1": True,
-            },
-        )
+        self._handshake_initialize()
 
         attach_args: dict[str, Any] = {
             "coreFile": str(core_path),
@@ -411,6 +416,301 @@ class DAPBackend(LLDBBackend):
             )
 
         return LaunchResult(status="running")
+
+    def attach_gdb_remote(
+        self,
+        host: str,
+        port: int,
+        target: str | None = None,
+        arch: str | None = None,
+        plugin: str | None = None,
+    ) -> LaunchResult:
+        """Attach to a gdb-remote stub via lldb-dap.
+
+        Uses the adapter's `gdb-remote-hostname` / `gdb-remote-port` attach
+        config (verified against Xcode-shipped and LLVM lldb-dap binaries).
+        Surfaces the adapter error directly when the installed lldb-dap
+        build does not recognize these keys.
+        """
+        self.connect()
+        assert self._session is not None
+
+        self.last_launch = {
+            "host": host,
+            "port": int(port),
+            "program": target,
+            "arch": arch,
+            "plugin": plugin,
+            "mode": self.SESSION_KIND_GDB_REMOTE,
+        }
+        self.thread_id = None
+        self.frame_id = None
+        self.breakpoints = []
+
+        self._handshake_initialize()
+
+        init_commands: list[str] = list(self.PERF_INIT_COMMANDS)
+        if arch:
+            init_commands.append(f"settings set target.default-arch {arch}")
+        if plugin:
+            init_commands.append(f"settings set plugin.process.gdb-remote.target {plugin}")
+
+        attach_args: dict[str, Any] = {
+            "gdb-remote-hostname": str(host),
+            "gdb-remote-port": int(port),
+            "initCommands": init_commands,
+            "enableDisplayExtendedBacktrace": False,
+        }
+        if target:
+            attach_args["program"] = str(target)
+
+        try:
+            self._session.request("attach", attach_args)
+        except DAPError as e:
+            return LaunchResult(
+                status="error",
+                error=str(e),
+                hint=(
+                    "lldb-dap rejected gdb-remote attach. Confirm the adapter "
+                    "supports 'gdb-remote-hostname'/'gdb-remote-port' (Xcode 16 "
+                    "command-line tools or recent LLVM) and that the stub is "
+                    "listening on the requested port."
+                ),
+            )
+
+        try:
+            self._session.wait_for_event("initialized", timeout=min(2.0, self.timeout))
+        except TimeoutError:
+            pass
+
+        try:
+            self._session.request("configurationDone")
+        except DAPError as e:
+            logger.warning("configurationDone failed: %s", e)
+
+        stop_event = self._wait_for_stopped(self.timeout)
+        if stop_event:
+            return LaunchResult(
+                status="stopped",
+                thread_id=self.thread_id,
+                frame_id=self.frame_id,
+                reason=stop_event.reason,
+            )
+        return LaunchResult(status="running")
+
+    # =========================================================================
+    # Kernel / remote helpers
+    # =========================================================================
+
+    # Matches `[ N ] 0x<load_addr> 0x<slide_or_file_addr> <path>` from
+    # `image list -h -o -f`. lldb prints the file address in the second
+    # column when no valid load address is available (no running process),
+    # and the actual slide only when the process is live.
+    _IMAGE_LIST_HO_RE = re.compile(
+        r"^\s*\[\s*\d+\s*\]\s+(0x[0-9a-fA-F]+)\s+(0x[0-9a-fA-F]+)\s+(\S.*)$"
+    )
+
+    def _parse_image_list(self, raw: str) -> list[dict[str, Any]]:
+        """Parse `image list -h -o -f` output.
+
+        Returns one dict per module with ``load_addr``, ``slide``, and
+        ``path``. ``slide`` is populated only when lldb actually resolved
+        one — when the second column differs from the first. When lldb
+        cannot determine a slide (no running process, module unloaded)
+        both columns hold the file address and ``slide`` is ``None`` so
+        callers don't apply the link base as a slide.
+        """
+        results: list[dict[str, Any]] = []
+        for line in raw.splitlines():
+            m = self._IMAGE_LIST_HO_RE.match(line)
+            if not m:
+                continue
+            load_addr = _try_parse_address(m.group(1))
+            offset_col = _try_parse_address(m.group(2))
+            path = m.group(3).strip()
+            basename = os.path.basename(path)
+
+            slide: int | None
+            if (
+                load_addr is not None
+                and offset_col is not None
+                and offset_col != load_addr
+            ):
+                slide = offset_col
+            else:
+                slide = None
+
+            results.append(
+                {
+                    "load_addr": load_addr,
+                    "slide": slide,
+                    "path": path,
+                    "name": basename,
+                }
+            )
+        return results
+
+    def add_module(
+        self,
+        path: str,
+        dsym: str | None = None,
+        slide: int | None = None,
+        load_addr: int | None = None,
+    ) -> dict[str, Any]:
+        """Add a module (and optional dSYM) to the current target.
+
+        Path and module-name arguments are shell-quoted so bundles like
+        ``/Applications/My App.app/Contents/MacOS/My App`` load correctly.
+        """
+        if not self._session:
+            raise RuntimeError("No active DAP session")
+
+        outputs: list[str] = []
+        quoted_path = shlex.quote(path)
+        outputs.append(self.execute_command(f"target modules add {quoted_path}"))
+        if dsym:
+            outputs.append(
+                self.execute_command(f"target symbols add {shlex.quote(dsym)}")
+            )
+
+        basename = os.path.basename(path)
+        quoted_basename = shlex.quote(basename)
+        if slide is not None:
+            outputs.append(
+                self.execute_command(
+                    f"target modules load --file {quoted_basename} --slide {slide:#x}"
+                )
+            )
+        elif load_addr is not None:
+            # No explicit section: use __TEXT as the conventional default for
+            # Mach-O kernels/kexts.
+            outputs.append(
+                self.execute_command(
+                    f"target modules load --file {quoted_basename} __TEXT {load_addr:#x}"
+                )
+            )
+
+        combined = "\n".join(out for out in outputs if out)
+        loaded = "error" not in combined.lower()
+        return {
+            "module": basename,
+            "path": path,
+            "dsym": dsym,
+            "loaded": loaded,
+            "output": combined,
+        }
+
+    def get_module_slide(self, module: str | None = None) -> int | None:
+        """Compute runtime ASLR/KASLR slide for a loaded module.
+
+        Requires an attached or running target: if the module has no
+        resolved load address (fresh target, not attached), the returned
+        value is ``None`` rather than the file address — callers must not
+        use the file address as a slide.
+
+        When a module name is supplied, lldb filters server-side with a
+        positional argument — important on kernel sessions where
+        unfiltered output lists hundreds of kexts.
+        """
+        if not self._session:
+            return None
+
+        cmd = "image list -h -o -f"
+        if module:
+            cmd = f"image list -h -o -f {shlex.quote(module)}"
+
+        raw = self.execute_command(cmd)
+        entries = self._parse_image_list(raw)
+        if not entries:
+            return None
+
+        picked = entries[0]
+        if module:
+            for entry in entries:
+                if entry.get("name") == module or entry.get("path") == module:
+                    picked = entry
+                    break
+
+        slide = picked.get("slide")
+        return slide if isinstance(slide, int) else None
+
+    def interrupt(self, timeout: float | None = None) -> StopEvent | None:
+        """Pause the running target via DAP `pause`."""
+        if not self._session:
+            raise RuntimeError("No active DAP session")
+        tid = self.thread_id or 0
+        try:
+            self._session.request("pause", {"threadId": tid})
+        except DAPError as e:
+            raise RuntimeError(f"pause failed: {e}") from e
+        return self._wait_for_stopped(timeout)
+
+    def write_memory(self, address: int | str, data: bytes) -> int:
+        """Write bytes to target memory.
+
+        Uses DAP `writeMemory` when the adapter advertises
+        `supportsWriteMemoryRequest`; otherwise falls back to the
+        REPL `memory write` command.
+        """
+        if not self._session:
+            raise RuntimeError("No active DAP session")
+
+        if isinstance(address, str):
+            addr_int = _try_parse_address(address)
+            if addr_int is None:
+                # Let lldb resolve symbolic addresses via REPL fallback.
+                addr_int = None
+        else:
+            addr_int = int(address)
+
+        if self.capabilities.get("supportsWriteMemoryRequest") and addr_int is not None:
+            payload = base64.b64encode(bytes(data)).decode("ascii")
+            try:
+                self._session.request(
+                    "writeMemory",
+                    {
+                        "memoryReference": f"0x{addr_int:x}",
+                        "data": payload,
+                        "allowPartial": False,
+                    },
+                )
+                return len(data)
+            except DAPError as e:
+                logger.debug("writeMemory request failed, falling back: %s", e)
+
+        # REPL fallback — works for arbitrary address expressions too.
+        hex_bytes = " ".join(f"0x{b:02x}" for b in data)
+        if addr_int is not None:
+            target_expr = f"0x{addr_int:x}"
+        else:
+            target_expr = str(address)
+        out = self.execute_command(f"memory write {target_expr} {hex_bytes}")
+        if "error" in out.lower():
+            raise RuntimeError(f"memory write failed: {out.strip()}")
+        return len(data)
+
+    def is_running(self) -> bool:
+        """Return True when the adapter reports the target is executing.
+
+        Uses a fresh `process status` REPL query instead of sticky
+        last_stop_event state — the latter gets set once at attach and
+        stays until the next stop, which would mis-report a resumed
+        target as still stopped.
+        """
+        if not self._session:
+            return False
+        try:
+            status = self.execute_command("process status")
+        except Exception:  # noqa: BLE001
+            return False
+        lowered = status.lower()
+        if "stopped" in lowered or "exited" in lowered:
+            return False
+        if "running" in lowered:
+            return True
+        # Unknown state string — be conservative and assume stopped so the
+        # caller does not attempt to interrupt something already halted.
+        return False
 
     # =========================================================================
     # Execution Control
